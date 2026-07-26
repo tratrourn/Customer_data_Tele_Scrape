@@ -1,0 +1,13 @@
+khemra_account.json
+.streamlit/secrets.toml
+tg_sessions/
+*.session
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+*.pem
+*.key
+*.p12
+*.pfx
