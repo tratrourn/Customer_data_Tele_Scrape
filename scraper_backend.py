@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -440,17 +441,42 @@ def pop_best_candidate(candidates, target_dt, max_gap_minutes):
     return candidates.pop(best_idx)
 
 
+class ScrapeCancelled(RuntimeError):
+    """Raised when the user stops a scrape run."""
+
+
 async def scrape_channels(
     selected_channels: Optional[Iterable[str]] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> dict:
     """
     Run the real Telegram scrape using the project's existing Telethon session.
     This keeps the Streamlit UI connected to the actual workflow in the folder
     without forcing any editor or notebook interactions.
     """
+    async def run_or_cancel(coro, timeout: float, message: str):
+        if progress_callback:
+            progress_callback(10, message)
+
+        task = asyncio.create_task(coro)
+        if stop_event:
+            stop_future = asyncio.get_running_loop().run_in_executor(None, stop_event.wait)
+            done, pending = await asyncio.wait(
+                {task, stop_future}, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
+            )
+            if stop_future in done:
+                task.cancel()
+                raise ScrapeCancelled("Scraping stopped by user.")
+            if task in done:
+                return task.result()
+            task.cancel()
+            raise asyncio.TimeoutError
+
+        return await asyncio.wait_for(task, timeout=timeout)
+
     start_time = time.time()
     from_date = from_date or (datetime.now() - timedelta(days=1))
     to_date = to_date or datetime.now()
@@ -469,8 +495,27 @@ async def scrape_channels(
     if not TELEGRAM_SESSION_STRING:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Debug: Print what we have
+    print(f"[DEBUG] TELEGRAM_SESSION_STRING: {'SET' if TELEGRAM_SESSION_STRING else 'NOT SET'} (length: {len(TELEGRAM_SESSION_STRING) if TELEGRAM_SESSION_STRING else 0})")
+    print(f"[DEBUG] SESSION_PATH: {SESSION_PATH}")
+    print(f"[DEBUG] SESSION_PATH exists: {SESSION_PATH.with_suffix('.session').exists()}")
+
+    if stop_event and stop_event.is_set():
+        return {
+            "messages_scanned": 0,
+            "records_extracted": 0,
+            "new_records": 0,
+            "duplicates": 0,
+            "invalid_records": 0,
+            "errors": 0,
+            "error_details": ["Scraping stopped by user."],
+            "records": [],
+            "processing_time": format_duration(start_time),
+            "status": "Stopped",
+        }
+
     # Check if session string is provided (required for Streamlit Cloud)
-    if not TELEGRAM_SESSION_STRING and not str(SESSION_PATH).endswith(".session"):
+    if not TELEGRAM_SESSION_STRING and not SESSION_PATH.with_suffix('.session').exists():
         raise RuntimeError(
             "❌ Telegram authentication unavailable.\n\n"
             "For Streamlit Cloud deployment:\n"
@@ -482,19 +527,26 @@ async def scrape_channels(
 
     try:
         async with TelegramClient(session_name, API_ID, API_HASH, request_retries=2) as client:
-            # Use timeout for client start (30 seconds)
+            # Use timeout for client connect and auth.
             try:
-                await asyncio.wait_for(client.connect(), timeout=30.0)
+                await run_or_cancel(client.connect(), timeout=20.0, message="Connecting to Telegram...")
             except asyncio.TimeoutError:
                 raise RuntimeError("⏱️ Timeout connecting to Telegram. The server may be unreachable or rate-limited.")
-            
+            except ScrapeCancelled:
+                raise
+
             # Only call start() if NOT using StringSession (StringSession doesn't need auth)
             if not TELEGRAM_SESSION_STRING:
                 try:
-                    await asyncio.wait_for(client.start(phone=PHONE_NUMBER), timeout=60.0)
+                    await run_or_cancel(client.start(phone=PHONE_NUMBER), timeout=30.0, message="Authenticating Telegram session...")
                 except asyncio.TimeoutError:
                     raise RuntimeError("⏱️ Timeout during Telegram authentication. Please try again later.")
-            
+                except ScrapeCancelled:
+                    raise
+
+            if stop_event and stop_event.is_set():
+                raise ScrapeCancelled("Scraping stopped by user.")
+
             if not await client.is_user_authorized():
                 raise RuntimeError(
                     "❌ Telegram session is not authorized.\n"
@@ -517,6 +569,9 @@ async def scrape_channels(
         MAX_RECORDS_PER_CHANNEL = 100    # Stop scanning if we get 100 good records
 
         for idx, channel_url in enumerate(channel_targets, start=1):
+            if stop_event and stop_event.is_set():
+                raise ScrapeCancelled("Scraping stopped by user.")
+
             if progress_callback:
                 progress_callback(int((idx / max(len(channel_targets), 1)) * 45), f"Scanning channel {idx}/{len(channel_targets)}")
 
@@ -528,6 +583,9 @@ async def scrape_channels(
 
                 # Iterate from newest to oldest so we can stop once messages are older than from_date.
                 async for msg in client.iter_messages(entity, offset_date=to_date, reverse=False, limit=MAX_MESSAGES_PER_CHANNEL):
+                    if stop_event and stop_event.is_set():
+                        raise ScrapeCancelled("Scraping stopped by user.")
+
                     if not msg.date:
                         continue
 
@@ -628,6 +686,19 @@ async def scrape_channels(
             "processing_time": format_duration(start_time),
             "status": "Completed" if errors == 0 else "Completed with warnings",
         }
+    except ScrapeCancelled as e:
+        return {
+            "messages_scanned": 0,
+            "records_extracted": 0,
+            "new_records": 0,
+            "duplicates": 0,
+            "invalid_records": 0,
+            "errors": 0,
+            "error_details": [str(e)],
+            "records": [],
+            "processing_time": format_duration(start_time),
+            "status": "Stopped",
+        }
     except RuntimeError as e:
         # Re-raise RuntimeError (auth/timeout issues) so it's shown to user
         raise e
@@ -716,13 +787,14 @@ def get_live_customer_records() -> pd.DataFrame:
     return normalized_df
 
 
-def run_scrape_job(selected_channels, from_date, to_date, progress_callback=None) -> dict:
+def run_scrape_job(selected_channels, from_date, to_date, progress_callback=None, stop_event=None) -> dict:
     result = asyncio.run(
         scrape_channels(
             selected_channels=selected_channels,
             from_date=from_date,
             to_date=to_date,
             progress_callback=progress_callback,
+            stop_event=stop_event,
         )
     )
 
