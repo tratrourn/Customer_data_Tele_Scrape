@@ -469,11 +469,37 @@ async def scrape_channels(
     if not TELEGRAM_SESSION_STRING:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
-    async with TelegramClient(session_name, API_ID, API_HASH) as client:
-        await client.start(phone=PHONE_NUMBER)
+    # Check if session string is provided (required for Streamlit Cloud)
+    if not TELEGRAM_SESSION_STRING and not str(SESSION_PATH).endswith(".session"):
+        raise RuntimeError(
+            "❌ Telegram authentication unavailable.\n\n"
+            "For Streamlit Cloud deployment:\n"
+            "1. Add 'TELEGRAM_SESSION_STRING' to your Streamlit Secrets\n"
+            "2. Generate it locally by running: streamlit run app.py → Settings → Authenticate Telegram\n\n"
+            "For local development:\n"
+            "1. Use a .session file from tg_sessions/ folder"
+        )
 
-        if not await client.is_user_authorized():
-            raise RuntimeError("Telegram session is not authorized. Re-authenticate in the browser workflow before running the scrape.")
+    try:
+        async with TelegramClient(session_name, API_ID, API_HASH, request_retries=2) as client:
+            # Use timeout for client start (30 seconds)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=30.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError("⏱️ Timeout connecting to Telegram. The server may be unreachable or rate-limited.")
+            
+            # Only call start() if NOT using StringSession (StringSession doesn't need auth)
+            if not TELEGRAM_SESSION_STRING:
+                try:
+                    await asyncio.wait_for(client.start(phone=PHONE_NUMBER), timeout=60.0)
+                except asyncio.TimeoutError:
+                    raise RuntimeError("⏱️ Timeout during Telegram authentication. Please try again later.")
+            
+            if not await client.is_user_authorized():
+                raise RuntimeError(
+                    "❌ Telegram session is not authorized.\n"
+                    "Please add a valid TELEGRAM_SESSION_STRING to Streamlit Secrets."
+                )
 
         channel_targets = list(selected_channels)
 
@@ -487,17 +513,21 @@ async def scrape_channels(
         pending_text_records = defaultdict(list)
         pending_location_messages = defaultdict(list)
 
+        MAX_MESSAGES_PER_CHANNEL = 2000  # Limit messages to scan per channel
+        MAX_RECORDS_PER_CHANNEL = 100    # Stop scanning if we get 100 good records
+
         for idx, channel_url in enumerate(channel_targets, start=1):
             if progress_callback:
-                progress_callback(int((idx / max(len(channel_targets), 1)) * 45), f"Connecting to channel {idx}/{len(channel_targets)}")
+                progress_callback(int((idx / max(len(channel_targets), 1)) * 45), f"Scanning channel {idx}/{len(channel_targets)}")
 
             try:
                 entity = await client.get_entity(channel_url)
                 batch_messages = 0
+                batch_records = 0
                 channel_name = getattr(entity, "title", None) or channel_url
 
                 # Iterate from newest to oldest so we can stop once messages are older than from_date.
-                async for msg in client.iter_messages(entity, offset_date=to_date, reverse=False):
+                async for msg in client.iter_messages(entity, offset_date=to_date, reverse=False, limit=MAX_MESSAGES_PER_CHANNEL):
                     if not msg.date:
                         continue
 
@@ -566,15 +596,20 @@ async def scrape_channels(
                         else:
                             pending_text_records[sender_id].append({"date": message_date, "record_index": len(extracted_records) - 1})
                     records_extracted += 1
+                    batch_records += 1
+
+                    # Stop if we've found enough records in this channel
+                    if batch_records >= MAX_RECORDS_PER_CHANNEL:
+                        break
 
                 if progress_callback:
-                    progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"Processed {channel_url}")
+                    progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"✓ {channel_name}: {batch_records} records")
 
             except Exception as exc:
                 errors += 1
-                error_details.append(f"{channel_url}: {type(exc).__name__}: {exc}")
+                error_details.append(f"{channel_url}: {type(exc).__name__}: {str(exc)[:100]}")
                 if progress_callback:
-                    progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"Channel read issue: {type(exc).__name__}")
+                    progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"⚠️ {type(exc).__name__}")
 
         new_records = max(records_extracted - duplicates, 0)
 
@@ -592,6 +627,23 @@ async def scrape_channels(
             "records": extracted_records,
             "processing_time": format_duration(start_time),
             "status": "Completed" if errors == 0 else "Completed with warnings",
+        }
+    except RuntimeError as e:
+        # Re-raise RuntimeError (auth/timeout issues) so it's shown to user
+        raise e
+    except Exception as e:
+        # Catch any other exceptions from the async context
+        return {
+            "messages_scanned": 0,
+            "records_extracted": 0,
+            "new_records": 0,
+            "duplicates": 0,
+            "invalid_records": 0,
+            "errors": 1,
+            "error_details": [f"Telegram connection error: {str(e)[:200]}"],
+            "records": [],
+            "processing_time": format_duration(start_time),
+            "status": "Failed",
         }
 
 

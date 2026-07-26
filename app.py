@@ -758,7 +758,7 @@ def render_scrape_data():
         if not selected_targets:
             selected_targets = list(TARGET_CHANNELS)
 
-        with st.spinner("Connecting to Telegram and collecting customer data..."):
+        with st.spinner("🔄 Connecting to Telegram and collecting customer data...\n⏳ This may take 1-2 minutes..."):
             try:
                 result = run_scrape_job(
                     selected_channels=selected_targets,
@@ -779,22 +779,46 @@ def render_scrape_data():
                     "processing_time": result.get("processing_time", "0m 00s"),
                 }
 
-                if result.get("errors", 0) > 0:
-                    st.warning("⚠️ Scraping completed with warnings. Review the system logs for details.")
+                if result.get("status") == "Failed":
+                    st.error("❌ Telegram Scraping Failed")
+                    st.error(result.get("error_details", ["Unknown error"])[0])
+                    st.info("💡 **Troubleshooting:**\n"
+                           "1. Ensure TELEGRAM_SESSION_STRING is set in Streamlit Secrets\n"
+                           "2. Generate a session string from a local Python script\n"
+                           "3. Check that your Telegram API credentials are correct\n"
+                           "4. Try again in a few minutes (Telegram may be rate-limiting)")
+                elif result.get("errors", 0) > 0:
+                    st.warning("⚠️ Scraping completed with warnings.")
                     details = result.get("error_details", [])
                     if details:
-                        st.caption("Detected channel issues:")
-                        for item in details[:8]:
-                            st.write(f"- {item}")
+                        with st.expander("View channel errors"):
+                            for item in details[:10]:
+                                st.code(item)
                 else:
-                    st.success("🟢 Scraping Completed Successfully")
+                    st.success("✅ Scraping Completed Successfully")
 
                 if result.get("sheet_status") == "not_connected":
-                    st.info("Google Sheets is not connected for this session, but the scrape result is available in the UI.")
+                    st.info("📋 Google Sheets is not connected for this session, but data is available in the UI.")
 
+            except RuntimeError as exc:
+                error_msg = str(exc)
+                st.session_state.scraping_status = "Failed"
+                st.error(error_msg)
+                if "TELEGRAM_SESSION_STRING" in error_msg:
+                    st.warning("**🔐 Setup required:**\n"
+                              "For Streamlit Cloud, add your Telegram session string to Secrets:\n"
+                              "1. Run the app locally\n"
+                              "2. Go to Scrape Data page → Settings → 'Generate Telegram Session'\n"
+                              "3. Copy the session string\n"
+                              "4. Paste it into Streamlit Secrets as `TELEGRAM_SESSION_STRING`")
+                elif "Timeout" in error_msg:
+                    st.warning("**⏱️ Connection timeout.**\n"
+                              "Telegram servers may be unreachable or overloaded.\n"
+                              "Please try again in a few moments.")
             except Exception as exc:
                 st.session_state.scraping_status = "Failed"
-                st.error(f"❌ Scraping failed: {exc}")
+                st.error(f"❌ Scraping failed: {type(exc).__name__}: {str(exc)[:200]}")
+                st.info("Check the System Logs for more details.")
 
         st.session_state.scraping_progress = 100
         progress_bar.progress(100, text="Scraping process finished")
