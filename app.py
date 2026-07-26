@@ -1,7 +1,6 @@
 import io
 import importlib
 import re
-import threading
 import time
 from datetime import datetime, timedelta
 
@@ -718,21 +717,6 @@ def render_dashboard():
 def render_scrape_data():
     render_header("Start New Scraping Process", "Select the Telegram channels and date range to collect customer data.")
 
-    if "scraping_running" not in st.session_state:
-        st.session_state.scraping_running = False
-    if "scraping_stop_requested" not in st.session_state:
-        st.session_state.scraping_stop_requested = False
-    if "scrape_result_holder" not in st.session_state:
-        st.session_state.scrape_result_holder = []
-    if "scrape_stop_event" not in st.session_state:
-        st.session_state.scrape_stop_event = None
-    if "scrape_thread" not in st.session_state:
-        st.session_state.scrape_thread = None
-    if "scraping_message" not in st.session_state:
-        st.session_state.scraping_message = "Ready to connect to Telegram"
-    if "scraping_phase" not in st.session_state:
-        st.session_state.scraping_phase = "Idle"
-
     st.info("Use this option when the scraping period follows a business day rather than a calendar day.")
 
     c1, c2 = st.columns(2)
@@ -758,123 +742,86 @@ def render_scrape_data():
 
     st.caption("Use this option when the scraping period follows a business day rather than a calendar day.")
 
-    if st.session_state.scraping_running:
-        if st.button("■ Stop Scraping", type="secondary", key="stop_scrape_button"):
-            st.session_state.scraping_status = "Stopping..."
-            st.session_state.scraping_stop_requested = True
-            if st.session_state.scrape_stop_event is not None:
-                st.session_state.scrape_stop_event.set()
-            st.rerun()
+    if st.button("▶ Start Scraping", type="primary", width="stretch", key="start_scrape_button"):
+        st.session_state.scraping_status = "In Progress"
+        st.session_state.scraping_progress = 0
+        st.session_state.current_page = "Scrape Data"
+        progress_bar = st.progress(0, text="Starting Telegram scrape")
 
-        st.info("Scraping is running in the background. Click Stop Scraping to cancel it.")
-    else:
-        if st.button("▶ Start Scraping", type="primary", width="stretch", key="start_scrape_button"):
-            st.session_state.scraping_status = "In Progress"
-            st.session_state.scraping_progress = 0
-            st.session_state.scraping_message = "Starting Telegram scrape"
-            st.session_state.current_page = "Scrape Data"
-            st.session_state.scraping_running = True
-            st.session_state.scraping_stop_requested = False
-            st.session_state.scrape_result_holder = []
-            stop_event = threading.Event()
-            st.session_state.scrape_stop_event = stop_event
+        def update_progress(value: int, message: str):
+            st.session_state.scraping_progress = value
+            progress_bar.progress(value, text=message)
 
-            def update_progress(value: int, message: str):
-                st.session_state.scraping_progress = value
-                st.session_state.scraping_message = message
-                if "Connecting" in message:
-                    st.session_state.scraping_phase = "Connecting"
-                elif "Authenticating" in message:
-                    st.session_state.scraping_phase = "Authenticating"
-                elif "Scanning" in message or "✓" in message:
-                    st.session_state.scraping_phase = "Scraping"
+        from_date = datetime.combine(st.session_state.selected_date_range[0], selected_start_time)
+        to_date = datetime.combine(st.session_state.selected_date_range[1], selected_end_time)
+        selected_targets = [CHANNEL_OPTIONS.get(name, name) for name in st.session_state.selected_channels]
+        if not selected_targets:
+            selected_targets = list(TARGET_CHANNELS)
+
+        with st.spinner("🔄 Connecting to Telegram and collecting customer data...\n⏳ This may take 1-2 minutes..."):
+            try:
+                result = run_scrape_job(
+                    selected_channels=selected_targets,
+                    from_date=from_date,
+                    to_date=to_date,
+                    progress_callback=update_progress,
+                )
+
+                st.session_state.scraping_status = result.get("status", "Completed")
+                st.session_state.scraping_results = {
+                    "messages_scanned": result.get("messages_scanned", 0),
+                    "records_extracted": result.get("records_extracted", 0),
+                    "new_records": result.get("new_records", 0),
+                    "duplicates": result.get("duplicates", 0),
+                    "invalid_records": result.get("invalid_records", 0),
+                    "errors": result.get("errors", 0),
+                    "error_details": result.get("error_details", []),
+                    "processing_time": result.get("processing_time", "0m 00s"),
+                }
+
+                if result.get("status") == "Failed":
+                    st.error("❌ Telegram Scraping Failed")
+                    st.error(result.get("error_details", ["Unknown error"])[0])
+                    st.info("💡 **Troubleshooting:**\n"
+                           "1. Ensure TELEGRAM_SESSION_STRING is set in Streamlit Secrets\n"
+                           "2. Generate a session string from a local Python script\n"
+                           "3. Check that your Telegram API credentials are correct\n"
+                           "4. Try again in a few minutes (Telegram may be rate-limiting)")
+                elif result.get("errors", 0) > 0:
+                    st.warning("⚠️ Scraping completed with warnings.")
+                    details = result.get("error_details", [])
+                    if details:
+                        with st.expander("View channel errors"):
+                            for item in details[:10]:
+                                st.code(item)
                 else:
-                    st.session_state.scraping_phase = "Running"
+                    st.success("✅ Scraping Completed Successfully")
 
-            from_date = datetime.combine(st.session_state.selected_date_range[0], selected_start_time)
-            to_date = datetime.combine(st.session_state.selected_date_range[1], selected_end_time)
-            selected_targets = [CHANNEL_OPTIONS.get(name, name) for name in st.session_state.selected_channels]
-            if not selected_targets:
-                selected_targets = list(TARGET_CHANNELS)
+                if result.get("sheet_status") == "not_connected":
+                    st.info("📋 Google Sheets is not connected for this session, but data is available in the UI.")
 
-            def worker():
-                try:
-                    result = run_scrape_job(
-                        selected_channels=selected_targets,
-                        from_date=from_date,
-                        to_date=to_date,
-                        progress_callback=update_progress,
-                        stop_event=stop_event,
-                    )
-                except Exception as exc:
-                    result = {
-                        "status": "Failed",
-                        "errors": 1,
-                        "error_details": [str(exc)],
-                        "messages_scanned": 0,
-                        "records_extracted": 0,
-                        "new_records": 0,
-                        "duplicates": 0,
-                        "invalid_records": 0,
-                        "processing_time": "0m 00s",
-                    }
-                st.session_state.scrape_result_holder.append(result)
+            except RuntimeError as exc:
+                error_msg = str(exc)
+                st.session_state.scraping_status = "Failed"
+                st.error(error_msg)
+                if "TELEGRAM_SESSION_STRING" in error_msg:
+                    st.warning("**🔐 Setup required:**\n"
+                              "For Streamlit Cloud, add your Telegram session string to Secrets:\n"
+                              "1. Run the app locally\n"
+                              "2. Go to Scrape Data page → Settings → 'Generate Telegram Session'\n"
+                              "3. Copy the session string\n"
+                              "4. Paste it into Streamlit Secrets as `TELEGRAM_SESSION_STRING`")
+                elif "Timeout" in error_msg:
+                    st.warning("**⏱️ Connection timeout.**\n"
+                              "Telegram servers may be unreachable or overloaded.\n"
+                              "Please try again in a few moments.")
+            except Exception as exc:
+                st.session_state.scraping_status = "Failed"
+                st.error(f"❌ Scraping failed: {type(exc).__name__}: {str(exc)[:200]}")
+                st.info("Check the System Logs for more details.")
 
-            thread = threading.Thread(target=worker, daemon=True)
-            thread.start()
-            st.session_state.scrape_thread = thread
-            st.rerun()
-
-    if st.session_state.scrape_result_holder:
-        result = st.session_state.scrape_result_holder.pop(0)
-        st.session_state.scraping_running = False
-        st.session_state.scraping_stop_requested = False
-        st.session_state.scrape_stop_event = None
-        st.session_state.scrape_thread = None
-        st.session_state.scraping_status = result.get("status", "Completed")
-        st.session_state.scraping_results = {
-            "messages_scanned": result.get("messages_scanned", 0),
-            "records_extracted": result.get("records_extracted", 0),
-            "new_records": result.get("new_records", 0),
-            "duplicates": result.get("duplicates", 0),
-            "invalid_records": result.get("invalid_records", 0),
-            "errors": result.get("errors", 0),
-            "error_details": result.get("error_details", []),
-            "processing_time": result.get("processing_time", "0m 00s"),
-        }
-
-        if result.get("status") == "Failed":
-            st.error("❌ Telegram Scraping Failed")
-            st.error(result.get("error_details", ["Unknown error"])[0])
-            st.info("💡 **Troubleshooting:**\n"
-                   "1. Ensure TELEGRAM_SESSION_STRING is set in Streamlit Secrets\n"
-                   "2. Generate a session string from a local Python script\n"
-                   "3. Check that your Telegram API credentials are correct\n"
-                   "4. Try again in a few minutes (Telegram may be rate-limiting)")
-        elif result.get("status") == "Stopped":
-            st.warning("🛑 Scraping stopped by user.")
-        elif result.get("errors", 0) > 0:
-            st.warning("⚠️ Scraping completed with warnings.")
-            details = result.get("error_details", [])
-            if details:
-                with st.expander("View channel errors"):
-                    for item in details[:10]:
-                        st.code(item)
-        else:
-            st.success("✅ Scraping Completed Successfully")
-
-        if result.get("sheet_status") == "not_connected":
-            st.info("📋 Google Sheets is not connected for this session, but data is available in the UI.")
-
-    if st.session_state.scraping_running and st.session_state.scrape_thread is not None:
-        st.info(f"**Current step:** {st.session_state.scraping_message}")
-        st.progress(st.session_state.scraping_progress / 100, text=st.session_state.scraping_message)
-        time.sleep(0.2)
-        st.rerun()
-    else:
-        if st.session_state.scraping_phase != "Idle":
-            st.info(f"**Last step:** {st.session_state.scraping_message}")
-        st.progress(st.session_state.scraping_progress / 100, text=st.session_state.scraping_message)
+        st.session_state.scraping_progress = 100
+        progress_bar.progress(100, text="Scraping process finished")
 
     status_col = st.columns(6)
     with status_col[0]:
