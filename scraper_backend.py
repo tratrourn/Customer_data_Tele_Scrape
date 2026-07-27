@@ -338,7 +338,7 @@ def extract_structured_fields(text: str) -> dict:
 
     store_current_field()
 
-    result["Tel"] = normalize_phone(result.get("Tel", ""))
+    result["Tel"] = normalize_phone(result.get("Tel", "").strip())
     return result
 
 
@@ -384,7 +384,7 @@ def build_output_record(channel_name: str, sender_id: int, sender_name: str, msg
 def record_key(record: dict) -> tuple:
     return (
         (record.get("Source_Channel") or "").strip(),
-        normalize_phone(record.get("Tel") or ""),
+        normalize_phone(record.get("Tel") or "").strip(),
         (record.get("Name") or "").strip().lower(),
         (record.get("Message_Date") or "").strip(),
     )
