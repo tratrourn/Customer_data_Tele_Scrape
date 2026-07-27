@@ -648,31 +648,115 @@ async def scrape_channels(
         }
 
 
-def push_records_to_sheet(records: list[dict]) -> dict:
-    """Push parsed customer rows to the configured worksheet in the target output format."""
+def get_google_worksheet():
+    """Connect to the configured Google Sheet/worksheet and return the worksheet handle."""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
     creds = get_google_service_account_credentials(scope)
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SHEET_ID)
-    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    return spreadsheet.worksheet(WORKSHEET_NAME)
 
-    df = pd.DataFrame(records)
-    df = df.reindex(columns=OUTPUT_COLUMNS, fill_value="")
-    df = sanitize_dataframe_for_sheets(df)
 
-    worksheet.clear()
-    worksheet.update([OUTPUT_COLUMNS] + df.values.tolist(), value_input_option="RAW")
+def push_records_to_sheet(records: list[dict]) -> dict:
+    """
+    Push scraped records to Google Sheets WITHOUT deleting existing data.
 
-    return {
-        "sheet_status": "updated",
-        "worksheet_name": worksheet.title,
-        "inserted_rows": len(df),
-        "duplicate_rows": 0,
-    }
+    Flow: read existing sheet -> build unique keys -> compare each new
+    record -> skip duplicates, append only genuinely new records.
+    """
+    try:
+        if not records:
+            return {
+                "success": True,
+                "inserted_rows": 0,
+                "duplicate_rows": 0,
+                "total_existing_rows": 0,
+                "total_rows_after": 0,
+                "sheet_status": "updated",
+                "worksheet_name": WORKSHEET_NAME,
+                "message": "No records found to upload.",
+            }
+
+        df_new = pd.DataFrame(records)
+        for col in OUTPUT_COLUMNS:
+            if col not in df_new.columns:
+                df_new[col] = ""
+        df_new = df_new[OUTPUT_COLUMNS]
+        df_new = sanitize_dataframe_for_sheets(df_new)
+
+        worksheet = get_google_worksheet()
+        ensure_sheet_headers(worksheet)
+
+        existing_values = worksheet.get_all_values()
+        if not existing_values or len(existing_values) == 1:
+            existing_df = pd.DataFrame(columns=OUTPUT_COLUMNS)
+        else:
+            headers = existing_values[0]
+            data_rows = existing_values[1:]
+            existing_df = pd.DataFrame(data_rows, columns=headers)
+            for col in OUTPUT_COLUMNS:
+                if col not in existing_df.columns:
+                    existing_df[col] = ""
+            existing_df = existing_df[OUTPUT_COLUMNS]
+
+        existing_keys = set()
+        for _, row in existing_df.iterrows():
+            key = record_key(row.to_dict())
+            if key:
+                existing_keys.add(key)
+
+        new_rows = []
+        current_run_keys = set()
+        duplicate_count = 0
+
+        for _, row in df_new.iterrows():
+            new_record = row.to_dict()
+            key = record_key(new_record)
+
+            if key in existing_keys or key in current_run_keys:
+                duplicate_count += 1
+                continue
+
+            new_rows.append([new_record.get(col, "") for col in OUTPUT_COLUMNS])
+            current_run_keys.add(key)
+
+        inserted_count = 0
+        if new_rows:
+            worksheet.append_rows(new_rows, value_input_option="RAW")
+            inserted_count = len(new_rows)
+
+        existing_count = len(existing_df)
+        total_after = existing_count + inserted_count
+
+        return {
+            "success": True,
+            "inserted_rows": inserted_count,
+            "duplicate_rows": duplicate_count,
+            "total_existing_rows": existing_count,
+            "total_rows_after": total_after,
+            "sheet_status": "updated",
+            "worksheet_name": worksheet.title,
+            "message": (
+                f"Google Sheet updated successfully. "
+                f"Added {inserted_count} new records. "
+                f"Skipped {duplicate_count} duplicate records."
+            ),
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "inserted_rows": 0,
+            "duplicate_rows": 0,
+            "total_existing_rows": 0,
+            "total_rows_after": 0,
+            "sheet_status": "not_connected",
+            "worksheet_name": WORKSHEET_NAME,
+            "message": f"Failed to update Google Sheets: {str(e)}",
+        }
 
 
 def get_live_google_sheet_records() -> pd.DataFrame:
