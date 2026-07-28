@@ -61,7 +61,7 @@ API_HASH = get_deployment_setting("TELEGRAM_API_HASH", "df22eea81948788953b28b81
 PHONE_NUMBER = get_deployment_setting("TELEGRAM_PHONE_NUMBER", "+855885478958")
 TELEGRAM_SESSION_STRING = get_deployment_setting("TELEGRAM_SESSION_STRING")
 SHEET_ID = get_deployment_setting("GOOGLE_SHEET_ID", "1wM7DTHizhg_A3h0qV3EhX4os4hk46uolW-ESQSJkgZs")
-WORKSHEET_NAME = get_deployment_setting("GOOGLE_WORKSHEET_NAME", "testing")
+WORKSHEET_NAME = get_deployment_setting("GOOGLE_WORKSHEET_NAME", "Retail_update")
 
 TARGET_CHANNELS = [
     "https://t.me/+1MbLNmcPsZw5YWJl", #TLK
@@ -514,8 +514,8 @@ async def scrape_channels(
             pending_text_records = defaultdict(list)
             pending_location_messages = defaultdict(list)
 
-            MAX_MESSAGES_PER_CHANNEL = 2000  # Limit messages to scan per channel
-            MAX_RECORDS_PER_CHANNEL = 100    # Stop scanning if we get 100 good records
+            MAX_MESSAGES_PER_CHANNEL = 1000000  # Limit messages to scan per channel
+            MAX_RECORDS_PER_CHANNEL = 1000000    # Stop scanning if we get 100 good records
 
             for idx, channel_url in enumerate(channel_targets, start=1):
                 if progress_callback:
