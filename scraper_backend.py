@@ -383,6 +383,16 @@ def build_output_record(channel_name: str, sender_id: int, sender_name: str, msg
     }
 
 
+def is_auto_bot_sender(sender_name: str | None, sender_id: object | None = None) -> bool:
+    """Return True when the message is from the auto bot sender that should be skipped."""
+    normalized_sender = (sender_name or "").strip().casefold()
+    if normalized_sender in {"bp_bot", "bp bot", "bp-bot"}:
+        return True
+    if sender_id is not None:
+        return str(sender_id).strip().casefold() in {"bp_bot", "bp bot", "bp-bot"}
+    return False
+
+
 def record_key(record: dict) -> tuple:
     return (
         (record.get("Source_Channel") or "").strip(),
@@ -447,6 +457,7 @@ async def scrape_channels(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     Run the real Telegram scrape using the project's existing Telethon session.
@@ -466,6 +477,10 @@ async def scrape_channels(
     selected_channels = list(selected_channels or TARGET_CHANNELS)
     if not selected_channels:
         selected_channels = list(TARGET_CHANNELS)
+
+    def emit_log(message: str) -> None:
+        if log_callback:
+            log_callback(message)
 
     async def resolve_channel_entity(
         client: TelegramClient,
@@ -502,6 +517,10 @@ async def scrape_channels(
             "1. Use a .session file from tg_sessions/ folder"
         )
 
+    emit_log("🧪 ===== TELEGRAM SCRAPER - MULTI-TARGET EXECUTION =====")
+    emit_log(f"📋 Global Limits: 1000000 requests, 1000000 messages (TESTING=True)")
+    emit_log(f"📅 Scrape window: {from_date:%Y-%m-%d %H:%M:%S}  ->  {to_date:%Y-%m-%d %H:%M:%S}")
+
     try:
         async with TelegramClient(
             session_name,
@@ -515,6 +534,7 @@ async def scrape_channels(
                 await asyncio.wait_for(client.connect(), timeout=30.0)
             except asyncio.TimeoutError:
                 raise RuntimeError("⏱️ Timeout connecting to Telegram. The server may be unreachable or rate-limited.")
+            emit_log("🔗 Connected to Telegram. Starting channel loop.")
             
             # Only call start() if NOT using StringSession (StringSession doesn't need auth)
             if not TELEGRAM_SESSION_STRING:
@@ -559,6 +579,9 @@ async def scrape_channels(
                     batch_messages = 0
                     batch_records = 0
                     channel_name = getattr(entity, "title", None) or channel_url
+                    emit_log("")
+                    emit_log(f"🎯 Starting scrape for: {channel_name}")
+                    emit_log(f"📅 Filter from {from_date:%Y-%m-%d %H:%M:%S} to {to_date:%Y-%m-%d %H:%M:%S}")
 
                     # Iterate from newest to oldest so we can stop once messages are older than from_date.
                     async for msg in client.iter_messages(entity, offset_date=to_date, reverse=False, limit=MAX_MESSAGES_PER_CHANNEL):
@@ -609,6 +632,10 @@ async def scrape_channels(
                         except Exception:
                             sender_name = ""
 
+                        if is_auto_bot_sender(sender_name, sender_id):
+                            emit_log(f"⏭️ Skipping auto bot sender: {sender_name or sender_id}")
+                            continue
+
                         extracted_records.append(
                             build_output_record(
                                 channel_name=channel_name,
@@ -638,17 +665,22 @@ async def scrape_channels(
 
                     if progress_callback:
                         progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"✓ {channel_name}: {batch_records} records")
+                    emit_log(f"✅ Done: {batch_messages} messages → {batch_records} customer records")
 
                 except Exception as exc:
                     errors += 1
                     error_details.append(f"{channel_url}: {type(exc).__name__}: {str(exc)[:100]}")
                     if progress_callback:
                         progress_callback(int((idx / max(len(channel_targets), 1)) * 75), f"⚠️ {type(exc).__name__}")
+                    emit_log(f"⚠️ Channel error: {type(exc).__name__}: {str(exc)[:160]}")
 
             new_records = max(records_extracted - duplicates, 0)
 
             if progress_callback:
                 progress_callback(100, "Finalizing results")
+
+            emit_log("")
+            emit_log("🚀 PUSHING DATA TO GOOGLE SHEETS....")
 
             return {
                 "messages_scanned": messages_scanned,
@@ -693,7 +725,7 @@ def get_google_worksheet():
     return spreadsheet.worksheet(WORKSHEET_NAME)
 
 
-def push_records_to_sheet(records: list[dict]) -> dict:
+def push_records_to_sheet(records: list[dict], log_callback: Optional[Callable[[str], None]] = None) -> dict:
     """
     Push scraped records to Google Sheets WITHOUT deleting existing data.
 
@@ -712,6 +744,20 @@ def push_records_to_sheet(records: list[dict]) -> dict:
                 "worksheet_name": WORKSHEET_NAME,
                 "message": "No records found to upload.",
             }
+
+        warnings = []
+        for row_index, record in enumerate(records, start=1):
+            if not str(record.get("Loan_Type", "")).strip():
+                warnings.append(f"⚠️ Validation warning row {row_index}: Loan Type is empty")
+
+        if log_callback:
+            for warning in warnings[:20]:
+                log_callback(warning)
+            if len(warnings) > 20:
+                log_callback(f"⚠️ Validation warning output truncated: {len(warnings) - 20} more rows")
+
+        if log_callback:
+            log_callback("⚙️ Starting Google Sheets authentication...")
 
         df_new = pd.DataFrame(records)
         for col in OUTPUT_COLUMNS:
@@ -744,9 +790,15 @@ def push_records_to_sheet(records: list[dict]) -> dict:
         new_rows = []
         current_run_keys = set()
         duplicate_count = 0
+        skipped_bot_rows = 0
 
         for _, row in df_new.iterrows():
             new_record = row.to_dict()
+            sender_name = str(new_record.get("Sender_Name", "") or "").strip()
+            if is_auto_bot_sender(sender_name, new_record.get("Sender_ID")):
+                skipped_bot_rows += 1
+                continue
+
             key = record_key(new_record)
 
             if key in existing_keys or key in current_run_keys:
@@ -760,6 +812,11 @@ def push_records_to_sheet(records: list[dict]) -> dict:
         if new_rows:
             worksheet.append_rows(new_rows, value_input_option="RAW")
             inserted_count = len(new_rows)
+
+        if log_callback:
+            log_callback(f"✅ Pushed {inserted_count} rows to Google Sheets (Worksheet: {WORKSHEET_NAME}) at {datetime.now():%Y-%m-%d %H:%M:%S}")
+            if skipped_bot_rows:
+                log_callback(f"⏭️ Skipped {skipped_bot_rows} row(s) from BP_bot before upload")
 
         existing_count = len(existing_df)
         total_after = existing_count + inserted_count
@@ -776,7 +833,9 @@ def push_records_to_sheet(records: list[dict]) -> dict:
                 f"Google Sheet updated successfully. "
                 f"Added {inserted_count} new records. "
                 f"Skipped {duplicate_count} duplicate records."
+                f"{' and ' if skipped_bot_rows else ''}{skipped_bot_rows} bot records removed."
             ),
+            "warnings": warnings,
         }
 
     except Exception as e:
@@ -790,6 +849,46 @@ def push_records_to_sheet(records: list[dict]) -> dict:
             "worksheet_name": WORKSHEET_NAME,
             "message": f"Failed to update Google Sheets: {str(e)}",
         }
+
+
+def normalize_live_sheet_for_dashboard(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Google Sheet columns into the dashboard-friendly field names used by analytics and filters."""
+    if raw_df is None:
+        return pd.DataFrame()
+
+    normalized_df = raw_df.copy()
+    if normalized_df.empty:
+        return normalized_df
+
+    def pick_column(*candidates: str):
+        for candidate in candidates:
+            if candidate in normalized_df.columns:
+                return candidate
+        return None
+
+    def assign_text_column(target: str, *candidates: str) -> None:
+        source_column = pick_column(*candidates)
+        if source_column:
+            normalized_df[target] = normalized_df[source_column].fillna("").astype(str).str.strip()
+        else:
+            normalized_df[target] = ""
+
+    assign_text_column("Customer Name", "Customer Name", "Name", "Sender_Name", "Sender Name", "CustomerName")
+    assign_text_column("Phone Number", "Phone Number", "Tel", "Telephone", "Phone", "Phone_Number")
+    assign_text_column("Telegram Channel", "Telegram Channel", "Source_Channel", "Channel", "Source", "Source Channel")
+    assign_text_column("Business Type", "Business Type", "Business", "BusinessType", "Business_Type")
+    assign_text_column("Status", "Status", "Customer Status", "Status_", "Outcome")
+    assign_text_column("Potential_Level", "Potential_Level", "Potential Level", "Potential H/M/L", "Potential_H_M_L", "Potential")
+    assign_text_column("Potential_Product", "Potential_Product", "Potential Product", "PotentialProduct", "Product Type", "Product_Type")
+    assign_text_column("Bank", "Bank", "Competitor Bank", "Competitor_Bank", "Bank_Name")
+
+    message_date_column = pick_column("Message Date", "Message_Date", "Date", "Created At")
+    if message_date_column:
+        normalized_df["Message Date"] = pd.to_datetime(normalized_df[message_date_column], errors="coerce")
+    else:
+        normalized_df["Message Date"] = pd.Series([pd.NaT] * len(normalized_df))
+
+    return normalized_df.replace({pd.NA: "", None: ""}).copy()
 
 
 def get_live_google_sheet_records() -> pd.DataFrame:
@@ -808,44 +907,39 @@ def get_live_google_sheet_records() -> pd.DataFrame:
 def get_live_customer_records() -> pd.DataFrame:
     """Read the live Google Sheet and normalize the fields used in dashboard summaries."""
     raw_df = get_live_google_sheet_records()
-
     if raw_df.empty:
         return pd.DataFrame(columns=["Customer Name", "Phone Number", "Telegram Channel", "Message Date", "Business Type", "Status"])
 
-    customer_name = raw_df["Name"] if "Name" in raw_df.columns else raw_df.get("Sender_Name", pd.Series([""] * len(raw_df)))
-    phone_number = raw_df["Tel"] if "Tel" in raw_df.columns else raw_df.get("Phone Number", pd.Series([""] * len(raw_df)))
-    telegram_channel = raw_df["Source_Channel"] if "Source_Channel" in raw_df.columns else raw_df.get("Telegram Channel", pd.Series([""] * len(raw_df)))
-    business_type = raw_df["Business"] if "Business" in raw_df.columns else raw_df.get("Business Type", pd.Series([""] * len(raw_df)))
-    message_date = raw_df["Message_Date"] if "Message_Date" in raw_df.columns else raw_df.get("Message Date", pd.Series([""] * len(raw_df)))
-    status = raw_df["Status"] if "Status" in raw_df.columns else raw_df.get("Status", pd.Series([""] * len(raw_df)))
-
-    normalized_df = pd.DataFrame(
-        {
-            "Customer Name": customer_name.fillna(""),
-            "Phone Number": phone_number.fillna(""),
-            "Telegram Channel": telegram_channel.fillna(""),
-            "Message Date": message_date.fillna(""),
-            "Business Type": business_type.fillna(""),
-            "Status": status.fillna(""),
-        }
-    )
-
-    normalized_df = normalized_df.replace({pd.NA: "", None: ""})
-    return normalized_df
+    normalized_df = normalize_live_sheet_for_dashboard(raw_df)
+    return normalized_df[
+        [
+            "Customer Name",
+            "Phone Number",
+            "Telegram Channel",
+            "Message Date",
+            "Business Type",
+            "Status",
+            "Potential_Level",
+            "Potential_Product",
+            "Bank",
+        ]
+    ].copy().replace({pd.NA: "", None: ""})
 
 
-def run_scrape_job(selected_channels, from_date, to_date, progress_callback=None) -> dict:
+def run_scrape_job(selected_channels, from_date, to_date, progress_callback=None, log_callback=None) -> dict:
     result = asyncio.run(
         scrape_channels(
             selected_channels=selected_channels,
             from_date=from_date,
             to_date=to_date,
             progress_callback=progress_callback,
+            log_callback=log_callback,
         )
     )
 
     try:
-        sheet_result = push_records_to_sheet(result.get("records", []))
+        sheet_result = push_records_to_sheet(result.get("records", []), log_callback=log_callback)
+        result["warnings"] = sheet_result.get("warnings", [])
         result["new_records"] = int(sheet_result.get("inserted_rows", 0))
         result["duplicates"] = int(sheet_result.get("duplicate_rows", 0))
         result["invalid_records"] = max(int(result.get("records_extracted", 0)) - int(result.get("new_records", 0)), 0)

@@ -11,7 +11,15 @@ import streamlit as st
 import scraper_backend
 
 scraper_backend = importlib.reload(scraper_backend)
-from scraper_backend import SHEET_ID, TARGET_CHANNELS, WORKSHEET_NAME, get_live_customer_records, get_live_google_sheet_records, run_scrape_job
+from scraper_backend import (
+    SHEET_ID,
+    TARGET_CHANNELS,
+    WORKSHEET_NAME,
+    get_live_customer_records,
+    get_live_google_sheet_records,
+    normalize_live_sheet_for_dashboard,
+    run_scrape_job,
+)
 
 
 # ---------------------------
@@ -150,50 +158,70 @@ st.markdown(
     }
 
     .metric-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f7fbf8 100%);
-        border: 1px solid rgba(13, 92, 69, 0.14);
-        border-radius: 22px;
-        padding: 1.15rem 1.15rem 1rem 1.15rem;
-        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
+        position: relative;
+        overflow: hidden;
+        background: linear-gradient(180deg, #ffffff 0%, #f9fcfa 100%);
+        border: 1px solid rgba(13, 92, 69, 0.12);
+        border-radius: 24px;
+        padding: 1.15rem 1.1rem 1rem 1.1rem;
+        box-shadow: 0 18px 34px rgba(15, 23, 42, 0.06);
         height: 100%;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
-        min-height: 154px;
+        min-height: 158px;
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }
+
+    .metric-card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto auto 0;
+        width: 100%;
+        height: 4px;
+        background: linear-gradient(90deg, #0d5c45 0%, #18a56c 100%);
+        opacity: 0.9;
+    }
+
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 22px 42px rgba(15, 23, 42, 0.09);
+        border-color: rgba(13, 92, 69, 0.18);
     }
 
     .metric-title {
-        color: #66756f;
+        color: #5f6f68;
         font-size: 0.74rem;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.09em;
+        letter-spacing: 0.1em;
         line-height: 1.35;
         min-height: 2.1em;
-        margin-bottom: 0.65rem;
+        margin-bottom: 0.55rem;
+        padding-top: 0.2rem;
     }
 
     .metric-value {
-        font-size: clamp(2rem, 3vw, 2.4rem);
+        font-size: clamp(1.95rem, 3vw, 2.35rem);
         font-weight: 800;
-        color: #111827;
+        color: #102a43;
         margin: 0;
-        line-height: 1;
-        letter-spacing: -0.03em;
+        line-height: 1.02;
+        letter-spacing: -0.04em;
     }
 
     .metric-value.compact {
-        font-size: clamp(1.05rem, 1.6vw, 1.35rem);
-        line-height: 1.08;
-        letter-spacing: -0.015em;
+        font-size: clamp(1rem, 1.45vw, 1.25rem);
+        line-height: 1.12;
+        letter-spacing: -0.02em;
         word-break: break-word;
     }
 
     .metric-sub {
-        font-size: 0.82rem;
-        color: var(--muted);
-        line-height: 1.45;
-        margin-top: 0.85rem;
+        font-size: 0.8rem;
+        color: #667881;
+        line-height: 1.42;
+        margin-top: 0.75rem;
     }
 
     .badge {
@@ -459,7 +487,7 @@ def add_customer_filter_columns(df: pd.DataFrame) -> pd.DataFrame:
 def filter_customer_records(
     df: pd.DataFrame,
     *,
-    name_query: str = "",
+    sender_name_query: str = "",
     phone_query: str = "",
     date_range=None,
     channel: str = "All",
@@ -477,10 +505,13 @@ def filter_customer_records(
             if len(date_range) > 1:
                 filtered_df = filtered_df[record_dates <= date_range[1]]
 
-    if name_query and "Customer Name" in filtered_df.columns:
-        filtered_df = filtered_df[
-            filtered_df["Customer Name"].fillna("").astype(str).str.contains(name_query, case=False, na=False)
-        ]
+    if sender_name_query:
+        sender_columns = [column for column in ("Sender_Name", "Sender Name", "Customer Name") if column in filtered_df.columns]
+        if sender_columns:
+            sender_column = sender_columns[0]
+            filtered_df = filtered_df[
+                filtered_df[sender_column].fillna("").astype(str).str.contains(sender_name_query, case=False, na=False)
+            ]
     if phone_query and "Phone Number" in filtered_df.columns:
         filtered_df = filtered_df[
             filtered_df["Phone Number"].fillna("").astype(str).str.contains(phone_query, case=False, na=False)
@@ -528,13 +559,10 @@ def render_date_filter(label: str, *, mode_key: str, range_key: str, default_day
 
 
 def reset_customer_filters():
-    st.session_state.name_filter = ""
-    st.session_state.phone_filter = ""
+    st.session_state.sender_name_filter = ""
     st.session_state.customer_date_range = (NOW.date() - timedelta(days=14), NOW.date())
     st.session_state.customer_date_filter_mode = "7days last"
     st.session_state.customer_channel_filter = "All"
-    st.session_state.customer_business_filter = "All"
-    st.session_state.customer_status_filter = "All"
 
 
 def get_scraping_history() -> pd.DataFrame:
@@ -882,10 +910,31 @@ def render_scrape_data():
         st.session_state.scraping_progress = 0
         st.session_state.current_page = "Scrape Data"
         progress_bar = st.progress(0, text="Starting Telegram scrape")
+        terminal_box = st.empty()
+        log_lines = []
+
+        def render_terminal() -> None:
+            terminal_box.markdown(
+                """
+                <div class="log-panel" style="max-height: 420px; overflow-y: auto; white-space: pre-wrap;">
+                <strong>Live Scraping Terminal</strong>
+                <br><br>
+                {content}
+                </div>
+                """.format(content="<br>".join(line or "&nbsp;" for line in log_lines)),
+                unsafe_allow_html=True,
+            )
+
+        def append_log(message: str) -> None:
+            log_lines.append(message)
+            render_terminal()
 
         def update_progress(value: int, message: str):
             st.session_state.scraping_progress = value
             progress_bar.progress(value, text=message)
+            append_log(f"[{value:>3}%] {message}")
+
+        append_log("🧪 ===== TELEGRAM SCRAPER - MULTI-TARGET EXECUTION =====")
 
         from_date = datetime.combine(st.session_state.selected_date_range[0], selected_start_time)
         to_date = datetime.combine(st.session_state.selected_date_range[1], selected_end_time)
@@ -893,67 +942,90 @@ def render_scrape_data():
         if not selected_targets:
             selected_targets = list(TARGET_CHANNELS)
 
-        with st.spinner("🔄 Connecting to Telegram and collecting customer data...\n⏳ This may take 1-2 minutes..."):
-            try:
-                result = run_scrape_job(
-                    selected_channels=selected_targets,
-                    from_date=from_date,
-                    to_date=to_date,
-                    progress_callback=update_progress,
-                )
+        append_log(f"📋 Global Limits: 1000000 requests, 1000000 messages (TESTING=True)")
+        append_log(f"📅 Scrape window: {from_date:%Y-%m-%d %H:%M:%S}  ->  {to_date:%Y-%m-%d %H:%M:%S}")
+        append_log("🔗 Connecting to Telegram...")
 
-                st.session_state.scraping_status = result.get("status", "Completed")
-                st.session_state.scraping_results = {
-                    "messages_scanned": result.get("messages_scanned", 0),
-                    "records_extracted": result.get("records_extracted", 0),
-                    "new_records": result.get("new_records", 0),
-                    "duplicates": result.get("duplicates", 0),
-                    "invalid_records": result.get("invalid_records", 0),
-                    "errors": result.get("errors", 0),
-                    "error_details": result.get("error_details", []),
-                    "processing_time": result.get("processing_time", "0m 00s"),
-                }
+        try:
+            result = run_scrape_job(
+                selected_channels=selected_targets,
+                from_date=from_date,
+                to_date=to_date,
+                progress_callback=update_progress,
+                log_callback=append_log,
+            )
 
-                if result.get("status") == "Failed":
-                    st.error("❌ Telegram Scraping Failed")
-                    st.error(result.get("error_details", ["Unknown error"])[0])
-                    st.info("💡 **Troubleshooting:**\n"
-                           "1. Ensure TELEGRAM_SESSION_STRING is set in Streamlit Secrets\n"
-                           "2. Generate a session string from a local Python script\n"
-                           "3. Check that your Telegram API credentials are correct\n"
-                           "4. Try again in a few minutes (Telegram may be rate-limiting)")
-                elif result.get("errors", 0) > 0:
-                    st.warning("⚠️ Scraping completed with warnings.")
-                    details = result.get("error_details", [])
-                    if details:
-                        with st.expander("View channel errors"):
-                            for item in details[:10]:
-                                st.code(item)
-                else:
-                    st.success("✅ Scraping Completed Successfully")
+            st.session_state.scraping_status = result.get("status", "Completed")
+            st.session_state.scraping_results = {
+                "messages_scanned": result.get("messages_scanned", 0),
+                "records_extracted": result.get("records_extracted", 0),
+                "new_records": result.get("new_records", 0),
+                "duplicates": result.get("duplicates", 0),
+                "invalid_records": result.get("invalid_records", 0),
+                "errors": result.get("errors", 0),
+                "error_details": result.get("error_details", []),
+                "processing_time": result.get("processing_time", "0m 00s"),
+            }
 
-                if result.get("sheet_status") == "not_connected":
-                    st.info("📋 Google Sheets is not connected for this session, but data is available in the UI.")
+            warnings = result.get("warnings", [])
+            if warnings:
+                append_log("")
+                append_log("⚠️ Validation warnings:")
+                for warning in warnings[:20]:
+                    append_log(f"  • {warning}")
+                if len(warnings) > 20:
+                    append_log(f"  • ... and {len(warnings) - 20} more warnings")
 
-            except RuntimeError as exc:
-                error_msg = str(exc)
-                st.session_state.scraping_status = "Failed"
-                st.error(error_msg)
-                if "TELEGRAM_SESSION_STRING" in error_msg:
-                    st.warning("**🔐 Setup required:**\n"
-                              "For Streamlit Cloud, add your Telegram session string to Secrets:\n"
-                              "1. Run the app locally\n"
-                              "2. Go to Scrape Data page → Settings → 'Generate Telegram Session'\n"
-                              "3. Copy the session string\n"
-                              "4. Paste it into Streamlit Secrets as `TELEGRAM_SESSION_STRING`")
-                elif "Timeout" in error_msg:
-                    st.warning("**⏱️ Connection timeout.**\n"
-                              "Telegram servers may be unreachable or overloaded.\n"
-                              "Please try again in a few moments.")
-            except Exception as exc:
-                st.session_state.scraping_status = "Failed"
-                st.error(f"❌ Scraping failed: {type(exc).__name__}: {str(exc)[:200]}")
-                st.info("Check the System Logs for more details.")
+            append_log("")
+            append_log("🎉 EXECUTION COMPLETED!")
+            append_log("📊 Final Statistics:")
+            append_log(f"  • Total API Requests: {st.session_state.scraping_results.get('messages_scanned', 0)}/1000000")
+            append_log(f"  • Total Messages Fetched: {st.session_state.scraping_results.get('messages_scanned', 0)}")
+            append_log(f"  • Total Structured Records Found: {st.session_state.scraping_results.get('records_extracted', 0)}")
+            append_log(f"  • Time Elapsed: {st.session_state.scraping_results.get('processing_time', '0m 00s')}")
+
+            if result.get("status") == "Failed":
+                st.error("❌ Telegram Scraping Failed")
+                st.error(result.get("error_details", ["Unknown error"])[0])
+                st.info("💡 **Troubleshooting:**\n"
+                       "1. Ensure TELEGRAM_SESSION_STRING is set in Streamlit Secrets\n"
+                       "2. Generate a session string from a local Python script\n"
+                       "3. Check that your Telegram API credentials are correct\n"
+                       "4. Try again in a few minutes (Telegram may be rate-limiting)")
+            elif result.get("errors", 0) > 0:
+                st.warning("⚠️ Scraping completed with warnings.")
+                details = result.get("error_details", [])
+                if details:
+                    with st.expander("View channel errors"):
+                        for item in details[:10]:
+                            st.code(item)
+            else:
+                st.success("✅ Scraping Completed Successfully")
+
+            if result.get("sheet_status") == "not_connected":
+                st.info("📋 Google Sheets is not connected for this session, but data is available in the UI.")
+
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            st.session_state.scraping_status = "Failed"
+            st.error(error_msg)
+            append_log(f"❌ {error_msg}")
+            if "TELEGRAM_SESSION_STRING" in error_msg:
+                st.warning("**🔐 Setup required:**\n"
+                          "For Streamlit Cloud, add your Telegram session string to Secrets:\n"
+                          "1. Run the app locally\n"
+                          "2. Go to Scrape Data page → Settings → 'Generate Telegram Session'\n"
+                          "3. Copy the session string\n"
+                          "4. Paste it into Streamlit Secrets as `TELEGRAM_SESSION_STRING`")
+            elif "Timeout" in error_msg:
+                st.warning("**⏱️ Connection timeout.**\n"
+                          "Telegram servers may be unreachable or overloaded.\n"
+                          "Please try again in a few moments.")
+        except Exception as exc:
+            st.session_state.scraping_status = "Failed"
+            st.error(f"❌ Scraping failed: {type(exc).__name__}: {str(exc)[:200]}")
+            append_log(f"❌ Scraping failed: {type(exc).__name__}: {str(exc)[:200]}")
+            st.info("Check the System Logs for more details.")
 
         st.session_state.scraping_progress = 100
         progress_bar.progress(100, text="Scraping process finished")
@@ -993,9 +1065,9 @@ def render_scrape_data():
         st.metric("Processing Time", st.session_state.scraping_results.get('processing_time', '0m 00s'))
         cexport1, cexport2 = st.columns(2)
         with cexport1:
-            st.button("View Customer Records", width="stretch")
+            st.button("View Customer Records", width="stretch", on_click=go_to_page, args=("Customer Records",))
         with cexport2:
-            st.button("Export Results", width="stretch")
+            st.button("Export Results", width="stretch", on_click=go_to_page, args=("Data Export",))
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1008,20 +1080,12 @@ def render_customer_records():
     render_live_sheet_status()
     st.markdown("<div class='glass-card' style='margin-top:1rem;'>", unsafe_allow_html=True)
     st.subheader("Filter Bar")
-    business_options = ["All"] + sorted(
-        live_df["Business Type"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique().tolist()
-    ) if "Business Type" in live_df.columns else ["All"]
-    status_options = ["All"] + sorted(
-        live_df["Status"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique().tolist()
-    ) if "Status" in live_df.columns else ["All"]
     channel_options = get_sheet_channel_options(live_df)
 
-    f1, f2, f3, f4, f5, f6 = st.columns(6)
+    f1, f2, f3 = st.columns(3)
     with f1:
-        name_query = st.text_input("Search Customer Name", key="name_filter")
+        sender_name_query = st.text_input("Sender Name", key="sender_name_filter")
     with f2:
-        phone_query = st.text_input("Search Phone Number", key="phone_filter")
-    with f3:
         date_filter_mode, date_range = render_date_filter(
             "Filter date",
             mode_key="customer_date_filter_mode",
@@ -1029,13 +1093,9 @@ def render_customer_records():
             default_days=14,
             default_mode="7days last",
         )
-    with f4:
+    with f3:
         channel_label = st.selectbox("Telegram Channel", list(channel_options), key="customer_channel_filter")
         channel = channel_options[channel_label]
-    with f5:
-        business_type = st.selectbox("Business Type", business_options, key="customer_business_filter")
-    with f6:
-        status = st.selectbox("Status", status_options, key="customer_status_filter")
 
     btn1, btn2 = st.columns(2)
     with btn1:
@@ -1045,12 +1105,9 @@ def render_customer_records():
 
     df = filter_customer_records(
         live_df,
-        name_query=name_query,
-        phone_query=phone_query,
+        sender_name_query=sender_name_query,
         date_range=date_range,
         channel=channel,
-        business_type=business_type,
-        status=status,
     )
 
     k1, k2, k3, k4 = st.columns(4)
@@ -1184,7 +1241,8 @@ def render_telegram_channels():
 def render_analytics():
     render_header("Customer Data Analytics", "Monitor platform performance and record trends.")
 
-    live_df = get_customer_records().copy()
+    sheet_df = get_customer_records_with_sheet_headers()
+    live_df = normalize_live_sheet_for_dashboard(sheet_df)
     render_live_sheet_status()
     if "Message Date" in live_df.columns:
         live_df["Message Date"] = pd.to_datetime(live_df["Message Date"], errors="coerce")
@@ -1205,9 +1263,32 @@ def render_analytics():
     snapshot = {
         "total_records": len(analytics_df),
         "top_channel": analytics_df["Telegram Channel"].value_counts().idxmax() if "Telegram Channel" in analytics_df.columns and not analytics_df.empty else "N/A",
-        "top_location": analytics_df["Location"].value_counts().idxmax() if "Location" in analytics_df.columns and not analytics_df.empty else "N/A",
     }
-    k1, k2, k3, k4, k5 = st.columns(5)
+    top_sender = "N/A"
+    top_sender_count = 0
+    sender_columns = [column for column in ("Customer Name", "Sender_Name", "Sender Name", "Name") if column in analytics_df.columns]
+    if sender_columns and not analytics_df.empty:
+        sender_series = analytics_df[sender_columns[0]].fillna("").astype(str).str.strip()
+        sender_series = sender_series[(sender_series != "") & (sender_series.str.casefold() != "bp_bot")]
+        if not sender_series.empty:
+            sender_counts = sender_series.value_counts()
+            top_sender = sender_counts.idxmax()
+            top_sender_count = int(sender_counts.max())
+
+    potential_series = analytics_df["Potential_Level"].fillna("").astype(str).str.strip().str.upper() if "Potential_Level" in analytics_df.columns else pd.Series(dtype=str)
+
+    def count_potential(level_code: str) -> int:
+        if potential_series.empty:
+            return 0
+        if level_code == "H":
+            return int((potential_series.str.startswith("H") | potential_series.str.contains("HIGH", case=False, na=False)).sum())
+        if level_code == "M":
+            return int((potential_series.str.startswith("M") | potential_series.str.contains("MED", case=False, na=False)).sum())
+        if level_code == "L":
+            return int((potential_series.str.startswith("L") | potential_series.str.contains("LOW", case=False, na=False)).sum())
+        return 0
+
+    k1, k2, k3, k4 = st.columns(4)
     with k1:
         metric_card("Total Records", f"{snapshot['total_records']:,}", "Total customer records", "")
     with k2:
@@ -1220,11 +1301,21 @@ def render_analytics():
             selected_days = 1
         metric_card("Average Daily Records", f"{(snapshot['total_records'] / selected_days):.0f}", "For the selected date range", "")
     with k3:
-        metric_card("Top Channel", snapshot['top_channel'], "Highest record volume", "")
+        metric_card("Top Channel", snapshot['top_channel'], "Highest record volume", "", compact_value=True)
     with k4:
-        metric_card("Top Location", snapshot['top_location'], "Most common source location", "")
+        metric_card("Top Sender", top_sender, f"{top_sender_count:,} records", "", compact_value=True)
+
+    st.markdown("<div style='height: 0.9rem;'></div>", unsafe_allow_html=True)
+
+    k5, k6, k7 = st.columns(3)
     with k5:
-        metric_card("Top Business Type", (analytics_df["Business Type"].value_counts().idxmax() if "Business Type" in analytics_df.columns and not analytics_df.empty else "N/A"), "Popular segment", "")
+        metric_card("Total High Potentail (H)", f"{count_potential('H'):,}", "Counted from Potential_Level", "")
+    with k6:
+        metric_card("Total Meduim Potentail (M)", f"{count_potential('M'):,}", "Counted from Potential_Level", "")
+    with k7:
+        metric_card("Total Low Potentail (L)", f"{count_potential('L'):,}", "Counted from Potential_Level", "")
+
+    st.markdown("<div style='height: 1.35rem;'></div>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1240,36 +1331,171 @@ def render_analytics():
         fig.update_traces(marker_color="#0d5c45")
         st.plotly_chart(fig, width="stretch")
 
-    c3, c4 = st.columns(2)
-    with c3:
-        location_df = analytics_df.groupby("Location").size().reset_index(name="Records") if "Location" in analytics_df.columns else pd.DataFrame(columns=["Location", "Records"])
-        fig = px.pie(location_df, values="Records", names="Location", title="Records by Location", hole=0.45)
-        st.plotly_chart(fig, width="stretch")
-    with c4:
-        business_df = analytics_df.groupby("Business Type").size().reset_index(name="Records") if "Business Type" in analytics_df.columns else pd.DataFrame(columns=["Business Type", "Records"])
-        fig = px.bar(business_df, x="Business Type", y="Records", title="Records by Business Type", template="plotly_white")
-        fig.update_traces(marker_color="#0d5c45")
-        st.plotly_chart(fig, width="stretch")
+    st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+    st.subheader("KPI Breakdown")
 
-    c5, c6 = st.columns(2)
-    with c5:
-        today_records = 0
-        older_records = 0
-        if "Message Date" in analytics_df.columns and not analytics_df.empty:
-            today_records = int(analytics_df["Message Date"].dt.date.eq(NOW.date()).sum())
-            older_records = int(len(analytics_df) - today_records)
-        compare_df = pd.DataFrame({"Label": ["Today", "Earlier"], "Records": [today_records, older_records]})
-        fig = px.bar(compare_df, x="Label", y="Records", title="Today vs Earlier Records", template="plotly_white")
-        fig.update_traces(marker_color=["#0d5c45", "#6b7280"])
-        st.plotly_chart(fig, width="stretch")
-    with c6:
-        coverage_rate = 0.0
-        if not analytics_df.empty and "Phone Number" in analytics_df.columns:
-            coverage_rate = round((analytics_df["Phone Number"].fillna("").astype(str).str.strip() != "").mean() * 100, 1)
-        success_df = pd.DataFrame({"Metric": ["Contact Coverage"], "Value": [coverage_rate]})
-        fig = px.bar(success_df, x="Metric", y="Value", title="Live Record Coverage", template="plotly_white")
-        fig.update_traces(marker_color="#1f9d55")
-        st.plotly_chart(fig, width="stretch")
+    sender_source = None
+    for column in ("Sender_Name", "Sender Name", "Customer Name", "Name"):
+        if column in analytics_df.columns:
+            sender_source = column
+            break
+
+    if sender_source:
+        sender_breakdown = (
+            analytics_df[analytics_df[sender_source].fillna("").astype(str).str.strip() != ""]
+            .assign(Sender=analytics_df[sender_source].fillna("").astype(str).str.strip())
+            .query('Sender.str.casefold() != "bp_bot"', engine="python")
+            .groupby("Sender")
+            .size()
+            .reset_index(name="Leads Total")
+            .sort_values("Leads Total", ascending=False)
+        )
+    else:
+        sender_breakdown = pd.DataFrame(columns=["Sender", "Leads Total"])
+
+    if "Potential_Product" in analytics_df.columns:
+        product_breakdown = (
+            analytics_df[analytics_df["Potential_Product"].fillna("").astype(str).str.strip() != ""]
+            .assign(**{"Product Type": analytics_df["Potential_Product"].fillna("").astype(str).str.strip()})
+            .groupby("Product Type")
+            .size()
+            .reset_index(name="Total")
+            .sort_values("Total", ascending=False)
+        )
+    else:
+        product_breakdown = pd.DataFrame(columns=["Product Type", "Total"])
+
+    if "Business" in analytics_df.columns:
+        business_breakdown = (
+            analytics_df[analytics_df["Business"].fillna("").astype(str).str.strip() != ""]
+            .assign(**{"Business Type": analytics_df["Business"].fillna("").astype(str).str.strip()})
+            .groupby("Business Type")
+            .size()
+            .reset_index(name="Total")
+            .sort_values("Total", ascending=False)
+        )
+    else:
+        business_breakdown = pd.DataFrame(columns=["Business Type", "Total"])
+
+    if "Bank" in analytics_df.columns:
+        bank_breakdown = (
+            analytics_df[analytics_df["Bank"].fillna("").astype(str).str.strip() != ""]
+            .assign(**{"Competitor Bank": analytics_df["Bank"].fillna("").astype(str).str.strip()})
+            .groupby("Competitor Bank")
+            .size()
+            .reset_index(name="Total")
+            .sort_values("Total", ascending=False)
+        )
+    else:
+        bank_breakdown = pd.DataFrame(columns=["Competitor Bank", "Total"])
+
+    if "Telegram Channel" in analytics_df.columns:
+        source_breakdown = (
+            analytics_df[analytics_df["Telegram Channel"].fillna("").astype(str).str.strip() != ""]
+            .assign(**{"Source Channels": analytics_df["Telegram Channel"].fillna("").astype(str).str.strip()})
+            .groupby("Source Channels")
+            .size()
+            .reset_index(name="Total Sent")
+            .sort_values("Total Sent", ascending=False)
+        )
+        if not source_breakdown.empty:
+            source_breakdown["% of Total"] = (source_breakdown["Total Sent"] / max(len(analytics_df), 1) * 100).round(1).astype(str) + "%"
+    else:
+        source_breakdown = pd.DataFrame(columns=["Source Channels", "Total Sent", "% of Total"])
+
+    unique_customer_total = 0
+    unique_customer_source = None
+    for column in ("Phone Number", "Tel", "Customer Name", "Sender_Name", "Name"):
+        if column in analytics_df.columns:
+            unique_customer_source = column
+            break
+    if unique_customer_source:
+        unique_customer_total = int(
+            analytics_df[unique_customer_source].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()
+        )
+
+    def chart_card(title: str):
+        return st.container()
+
+    st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
+    kpi_top_1, kpi_top_2 = st.columns([1, 4])
+    with kpi_top_1:
+        metric_card("Unique Customers", f"{unique_customer_total:,}", "Live unique customer count", "")
+    with kpi_top_2:
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.subheader("KPI Breakdown")
+
+        def make_bar_frame(frame: pd.DataFrame, label_col: str, value_col: str, limit: int = 8) -> pd.DataFrame:
+            if frame.empty:
+                return frame
+            return frame.head(limit).copy()
+
+        chart_row_1, chart_row_2 = st.columns(2)
+
+        with chart_row_1:
+            st.caption("Sender")
+            if not sender_breakdown.empty:
+                sender_chart = make_bar_frame(sender_breakdown, "Sender", "Leads Total")
+                fig = px.bar(sender_chart, x="Leads Total", y="Sender", orientation="h", template="plotly_white")
+                fig.update_traces(marker_color="#0d5c45", text=sender_chart["Leads Total"], textposition="outside")
+                fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Leads Total", yaxis_title="")
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No sender data available.")
+
+        with chart_row_2:
+            st.caption("Product Type")
+            if not product_breakdown.empty:
+                product_chart = make_bar_frame(product_breakdown, "Product Type", "Total")
+                fig = px.bar(product_chart, x="Total", y="Product Type", orientation="h", template="plotly_white")
+                fig.update_traces(marker_color="#147d57", text=product_chart["Total"], textposition="outside")
+                fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Total", yaxis_title="")
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No product type data available.")
+
+        chart_row_3, chart_row_4 = st.columns(2)
+        with chart_row_3:
+            st.caption("Business Type")
+            if not business_breakdown.empty:
+                business_chart = make_bar_frame(business_breakdown, "Business Type", "Total")
+                fig = px.bar(business_chart, x="Total", y="Business Type", orientation="h", template="plotly_white")
+                fig.update_traces(marker_color="#1f9d55", text=business_chart["Total"], textposition="outside")
+                fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Total", yaxis_title="")
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No business type data available.")
+
+        with chart_row_4:
+            st.caption("Competitor Bank")
+            if not bank_breakdown.empty:
+                bank_chart = make_bar_frame(bank_breakdown, "Competitor Bank", "Total")
+                fig = px.bar(bank_chart, x="Total", y="Competitor Bank", orientation="h", template="plotly_white")
+                fig.update_traces(marker_color="#0f6f8f", text=bank_chart["Total"], textposition="outside")
+                fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Total", yaxis_title="")
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No competitor bank data available.")
+
+        st.markdown("<div style='height: 0.5rem;'></div>", unsafe_allow_html=True)
+        st.caption("Source Channels")
+        if not source_breakdown.empty:
+            source_chart = make_bar_frame(source_breakdown, "Source Channels", "Total Sent")
+            fig = px.bar(source_chart, x="Total Sent", y="Source Channels", orientation="h", template="plotly_white")
+            fig.update_traces(
+                marker_color="#0d5c45",
+                text=source_chart["% of Total"] if "% of Total" in source_chart.columns else source_chart["Total Sent"],
+                textposition="outside",
+            )
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="Total Sent", yaxis_title="")
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No source channel data available.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_data_export():
@@ -1317,6 +1543,11 @@ def render_data_export():
     with c2:
         st.download_button("📊 Export Excel", excel_bytes.getvalue(), file_name="scraping_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def go_to_page(page_name: str) -> None:
+    st.session_state.current_page = page_name
+    st.rerun()
 
 
 def render_system_logs():
