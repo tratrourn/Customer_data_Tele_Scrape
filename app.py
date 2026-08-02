@@ -71,6 +71,9 @@ CHANNEL_OPTIONS = {label: channel for label, channel in zip(CHANNEL_LABELS, TARG
 CHANNELS = list(CHANNEL_OPTIONS.keys())
 DEFAULT_CHANNELS = CHANNELS[:3]
 NOW = datetime.now()
+BRAND_TITLE = "Scraping, Dashboard and Customer Data Management"
+BRAND_SUBTITLE = "Customer data scraping & Performance"
+BRAND_LOGO_URL = "https://www.chipmongbank.com/fb-og-image.jpg"
 
 st.set_page_config(
     page_title="Customer Data Scraping Dashboard",
@@ -147,33 +150,50 @@ st.markdown(
     }
 
     .metric-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f6fbf9 100%);
-        border: 1px solid #cfe2d9;
-        border-radius: 18px;
-        padding: 1rem 1.1rem;
-        box-shadow: 0 8px 24px rgba(13, 92, 69, 0.06);
+        background: linear-gradient(180deg, #ffffff 0%, #f7fbf8 100%);
+        border: 1px solid rgba(13, 92, 69, 0.14);
+        border-radius: 22px;
+        padding: 1.15rem 1.15rem 1rem 1.15rem;
+        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
         height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        min-height: 154px;
     }
 
     .metric-title {
-        color: var(--muted);
-        font-size: 0.82rem;
+        color: #66756f;
+        font-size: 0.74rem;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin-bottom: 0.3rem;
+        letter-spacing: 0.09em;
+        line-height: 1.35;
+        min-height: 2.1em;
+        margin-bottom: 0.65rem;
     }
 
     .metric-value {
-        font-size: 1.9rem;
+        font-size: clamp(2rem, 3vw, 2.4rem);
         font-weight: 800;
         color: #111827;
-        margin: 0.1rem 0;
+        margin: 0;
+        line-height: 1;
+        letter-spacing: -0.03em;
+    }
+
+    .metric-value.compact {
+        font-size: clamp(1.05rem, 1.6vw, 1.35rem);
+        line-height: 1.08;
+        letter-spacing: -0.015em;
+        word-break: break-word;
     }
 
     .metric-sub {
-        font-size: 0.84rem;
+        font-size: 0.82rem;
         color: var(--muted);
+        line-height: 1.45;
+        margin-top: 0.85rem;
     }
 
     .badge {
@@ -192,16 +212,106 @@ st.markdown(
     .badge.error { background: #fff0f0; color: #b91c1c; border-color: #f4b0b0; }
 
     .page-title {
-        font-size: 2rem;
+        font-size: 2.15rem;
         font-weight: 800;
-        color: #111827;
+        color: var(--primary);
         margin: 0;
+        line-height: 1.2;
     }
 
     .page-subtitle {
-        color: var(--muted);
-        font-size: 0.96rem;
-        margin-top: 0.15rem;
+        color: #14a44d;
+        font-size: 1rem;
+        font-weight: 700;
+        margin-top: 0.6rem;
+    }
+
+    .brand-shell {
+        background: #ffffff;
+        border: 1px solid rgba(13, 92, 69, 0.12);
+        border-radius: 24px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        padding: 1.25rem 1.2rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 188px;
+    }
+
+    .brand-logo-wrap {
+        width: 100%;
+        max-width: 320px;
+        margin: 0 auto;
+        text-align: center;
+    }
+
+    .brand-logo-box {
+        width: 100%;
+        margin: 0 auto;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .brand-logo-image {
+        width: min(220px, 100%);
+        height: auto;
+        display: block;
+        object-fit: contain;
+        border-radius: 0;
+    }
+
+    .brand-name {
+        font-size: 1.1rem;
+        font-weight: 800;
+        line-height: 1.05;
+        color: #495057;
+        letter-spacing: 0.02em;
+        display: none;
+    }
+
+    .brand-name .bank {
+        color: #0ca24a;
+    }
+
+    .hero-banner {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 188px;
+        padding: 0.75rem 1rem;
+    }
+
+    .hero-copy {
+        width: 100%;
+        text-align: center;
+        max-width: 920px;
+    }
+
+    .hero-title {
+        font-size: clamp(2rem, 4vw, 3.4rem);
+        font-weight: 800;
+        color: var(--primary);
+        line-height: 1.15;
+        margin: 0;
+    }
+
+    .hero-subtitle {
+        margin-top: 1rem;
+        color: #14a44d;
+        font-size: clamp(1rem, 1.4vw, 1.45rem);
+        font-weight: 700;
+    }
+
+    .hero-divider {
+        width: 72px;
+        height: 4px;
+        margin: 1rem auto 0 auto;
+        border-radius: 999px;
+        background: linear-gradient(90deg, rgba(13,92,69,0.15), rgba(13,92,69,0.55), rgba(13,92,69,0.15));
     }
 
     .header-status {
@@ -393,10 +503,35 @@ def filter_customer_records(
     return filtered_df
 
 
+def render_date_filter(label: str, *, mode_key: str, range_key: str, default_days: int = 14, default_mode: str = "7days last"):
+    options = ["All", "Today", "7days last", "Custom Date"]
+    selected_mode = st.selectbox(
+        label,
+        options=options,
+        index=options.index(default_mode) if default_mode in options else 0,
+        key=mode_key,
+    )
+
+    selected_range = None
+    if selected_mode == "Custom Date":
+        selected_range = st.date_input(
+            "Custom Date Range",
+            value=(NOW.date() - timedelta(days=default_days), NOW.date()),
+            key=range_key,
+        )
+    elif selected_mode == "Today":
+        selected_range = (NOW.date(), NOW.date())
+    elif selected_mode == "7days last":
+        selected_range = (NOW.date() - timedelta(days=6), NOW.date())
+
+    return selected_mode, selected_range
+
+
 def reset_customer_filters():
     st.session_state.name_filter = ""
     st.session_state.phone_filter = ""
     st.session_state.customer_date_range = (NOW.date() - timedelta(days=14), NOW.date())
+    st.session_state.customer_date_filter_mode = "7days last"
     st.session_state.customer_channel_filter = "All"
     st.session_state.customer_business_filter = "All"
     st.session_state.customer_status_filter = "All"
@@ -405,14 +540,14 @@ def reset_customer_filters():
 def get_scraping_history() -> pd.DataFrame:
     live_df = get_customer_records().copy()
     if live_df.empty:
-        return pd.DataFrame(columns=["Job ID", "Date", "Channel", "Start Time", "End Time", "Messages Scanned", "Records Found", "New Records", "Duplicates", "Status", "Processing Time"])
+        return pd.DataFrame(columns=["ID", "Date", "Channel", "Start Time", "End Time", "Messages Scanned", "Records Found", "New Records", "Duplicates", "Status", "Processing Time"])
 
     if "Message Date" in live_df.columns:
         live_df["Message Date"] = pd.to_datetime(live_df["Message Date"], errors="coerce")
         live_df = live_df.dropna(subset=["Message Date"])
 
     if live_df.empty:
-        return pd.DataFrame(columns=["Job ID", "Date", "Channel", "Start Time", "End Time", "Messages Scanned", "Records Found", "New Records", "Duplicates", "Status", "Processing Time"])
+        return pd.DataFrame(columns=["ID", "Date", "Channel", "Start Time", "End Time", "Messages Scanned", "Records Found", "New Records", "Duplicates", "Status", "Processing Time"])
 
     history_rows = []
     group_columns = [live_df["Message Date"].dt.date, "Telegram Channel"] if "Telegram Channel" in live_df.columns else [live_df["Message Date"].dt.date]
@@ -423,7 +558,7 @@ def get_scraping_history() -> pd.DataFrame:
             date_value, channel = group_key, "Live Google Sheet"
         history_rows.append(
             {
-                "Job ID": f"LIVE-{date_value.strftime('%Y%m%d')}-{index:03d}",
+                "ID": f"LIVE-{date_value.strftime('%Y%m%d')}-{index:03d}",
                 "Date": date_value.strftime("%Y-%m-%d"),
                 "Channel": str(channel),
                 "Start Time": "--",
@@ -523,14 +658,16 @@ init_session_state()
 # ---------------------------
 # Helpers
 # ---------------------------
-def metric_card(title: str, value: str, subtext: str, delta: str = ""):
+def metric_card(title: str, value: str, subtext: str, delta: str = "", compact_value: bool = False):
     with st.container():
+        footer_text = f"{delta} · {subtext}" if delta else subtext
+        value_class = "metric-value compact" if compact_value else "metric-value"
         st.markdown(
             f"""
             <div class="metric-card">
                 <div class="metric-title">{title}</div>
-                <div class="metric-value">{value}</div>
-                <div class="metric-sub">{delta} · {subtext}</div>
+                <div class="{value_class}">{value}</div>
+                <div class="metric-sub">{footer_text}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -601,9 +738,12 @@ def render_sidebar():
     with st.sidebar:
         st.markdown(
             """
-            <div style="text-align:center; padding: 1rem 0.25rem 0.5rem 0.25rem;">
-                <div style="width: 72px; height: 72px; margin: 0 auto 0.8rem auto; border-radius: 18px; background: linear-gradient(135deg, #0d5c45 0%, #1f8b65 100%); color: white; display:flex; align-items:center; justify-content:center; font-size: 1.8rem; font-weight: 800;">CM</div>
-                <div style="font-size:1.1rem; font-weight: 800; color:#111827;">Customer Data Platform</div>
+            <div class="brand-shell" style="padding: 1rem 0.9rem; min-height: 170px;">
+                <div class="brand-logo-wrap">
+                    <div class="brand-logo-box">
+                        <img class="brand-logo-image" src="https://www.chipmongbank.com/fb-og-image.jpg" alt="Chip Mong Bank logo">
+                    </div>
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -624,19 +764,32 @@ def render_sidebar():
 
 
 def render_header(title: str, subtitle: str):
-    c1, c2 = st.columns([5, 1])
-    with c1:
-        st.markdown(f'<div class="page-title">{title}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="page-subtitle">{subtitle}</div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div style="display:flex; justify-content:flex-end; align-items:center; gap:0.55rem; margin-top:0.6rem;">', unsafe_allow_html=True)
-        st.markdown('<div class="header-status">🟢 System Ready</div>', unsafe_allow_html=True)
+    left, right = st.columns([1.05, 3.95], vertical_alignment="center")
+    with left:
+        st.markdown(
+            """
+            <div class="brand-shell">
+                <div class="brand-logo-wrap">
+                    <div class="brand-logo-box">
+                        <img class="brand-logo-image" src="https://www.chipmongbank.com/fb-og-image.jpg" alt="Chip Mong Bank logo">
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown('<div class="hero-banner">', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="hero-copy"><div class="hero-title">{title}</div><div class="hero-divider"></div><div class="hero-subtitle">{subtitle}</div></div>',
+            unsafe_allow_html=True,
+        )
         st.markdown('</div>', unsafe_allow_html=True)
         st.caption(f"Last Updated: {NOW.strftime('%d %b %Y, %I:%M %p')}")
 
 
 def render_dashboard():
-    render_header("Customer Data Scraping Dashboard", "Monitor Telegram data collection and customer records.")
+    render_header(BRAND_TITLE, BRAND_SUBTITLE)
 
     snapshot = get_dashboard_snapshot()
 
@@ -647,13 +800,13 @@ def render_dashboard():
     with m2:
         metric_card("New Records Today", f"{snapshot['new_today']:,}", "from live date field", "")
     with m3:
-        metric_card("Live Records", f"{snapshot['total_records']:,}", "current Google Sheet rows", "")
+        metric_card("Live Records", f"{snapshot['total_records']:,}", "current data's rows", "")
     with m4:
         metric_card("Failed Scrapes", f"{snapshot['failed_scrapes']:,}", "live sheet sync only", "")
     with m5:
         metric_card("Telegram Channels", f"{snapshot['unique_channels']:,}", "active in sheet", "")
     with m6:
-        metric_card("Last Scrape", snapshot['last_scrape'], "processing time", "")
+        metric_card("Last Scrape", snapshot['last_scrape'], "processing time", "", compact_value=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     live_df = get_customer_records().copy()
@@ -661,22 +814,22 @@ def render_dashboard():
     if "Message Date" in live_df.columns:
         live_df["Message Date"] = pd.to_datetime(live_df["Message Date"], errors="coerce")
 
-    dashboard_date_range = st.date_input(
-        "Filter chart records by date",
-        value=(NOW.date() - timedelta(days=30), NOW.date()),
-        key="dashboard_chart_date_range",
+    dashboard_filter_mode, dashboard_date_range = render_date_filter(
+        "Filter date",
+        mode_key="dashboard_chart_date_filter_mode",
+        range_key="dashboard_chart_date_range",
+        default_days=30,
+        default_mode="7days last",
     )
+
     chart_df = live_df.copy()
-    if (
-        "Message Date" in chart_df.columns
-        and isinstance(dashboard_date_range, tuple)
-        and len(dashboard_date_range) == 2
-    ):
-        record_dates = chart_df["Message Date"].dt.date
-        chart_df = chart_df[
-            (record_dates >= dashboard_date_range[0])
-            & (record_dates <= dashboard_date_range[1])
-        ]
+    if dashboard_filter_mode != "All" and "Message Date" in chart_df.columns and dashboard_date_range:
+        if isinstance(dashboard_date_range, tuple) and len(dashboard_date_range) == 2:
+            record_dates = chart_df["Message Date"].dt.date
+            chart_df = chart_df[
+                (record_dates >= dashboard_date_range[0])
+                & (record_dates <= dashboard_date_range[1])
+            ]
 
     chart1, chart2 = st.columns(2)
 
@@ -695,24 +848,6 @@ def render_dashboard():
         fig.update_layout(title_x=0.02, margin=dict(l=20, r=20, t=50, b=20), paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
         fig.update_traces(marker_color="#0d5c45")
         st.plotly_chart(fig, width="stretch")
-
-    st.markdown("<div class='glass-card' style='margin-top:1rem'>", unsafe_allow_html=True)
-    header_col, button_col = st.columns([4, 1])
-    with header_col:
-        st.subheader("Recent Scraping Activity")
-    with button_col:
-        if st.button("View All Scraping History →"):
-            st.session_state.current_page = "Scraping History"
-            st.rerun()
-
-    history_df = get_scraping_history().head(5)
-    st.dataframe(
-        history_df[["Job ID", "Date", "Channel", "Status", "Messages Scanned", "Records Found", "New Records"]],
-        width="stretch",
-        hide_index=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
 
 def render_scrape_data():
     render_header("Start New Scraping Process", "Select the Telegram channels and date range to collect customer data.")
@@ -887,7 +1022,13 @@ def render_customer_records():
     with f2:
         phone_query = st.text_input("Search Phone Number", key="phone_filter")
     with f3:
-        date_range = st.date_input("Date Range", value=(NOW.date() - timedelta(days=14), NOW.date()), key="customer_date_range")
+        date_filter_mode, date_range = render_date_filter(
+            "Filter date",
+            mode_key="customer_date_filter_mode",
+            range_key="customer_date_range",
+            default_days=14,
+            default_mode="7days last",
+        )
     with f4:
         channel_label = st.selectbox("Telegram Channel", list(channel_options), key="customer_channel_filter")
         channel = channel_options[channel_label]
@@ -964,7 +1105,13 @@ def render_scraping_history():
     history_channels = ["All"] + sorted(hist["Channel"].dropna().astype(str).unique().tolist())
     history_statuses = ["All"] + sorted(hist["Status"].dropna().astype(str).unique().tolist())
     with h1:
-        date_range = st.date_input("Date Range", value=(NOW.date() - timedelta(days=15), NOW.date()), key="history_date_range")
+        date_filter_mode, date_range = render_date_filter(
+            "Filter date",
+            mode_key="history_date_filter_mode",
+            range_key="history_date_range",
+            default_days=15,
+            default_mode="7days last",
+        )
     with h2:
         selected_channel = st.selectbox("Telegram Channel", history_channels, key="history_channel_filter")
     with h3:
@@ -1042,20 +1189,18 @@ def render_analytics():
     if "Message Date" in live_df.columns:
         live_df["Message Date"] = pd.to_datetime(live_df["Message Date"], errors="coerce")
 
-    a1, a2 = st.columns(2)
-    with a1:
-        from_date = st.date_input("From Date", value=NOW.date() - timedelta(days=30), key="analytics_from_date")
-    with a2:
-        to_date = st.date_input("To Date", value=NOW.date(), key="analytics_to_date")
-
     analytics_df = live_df.copy()
-    if "Message Date" in analytics_df.columns:
-        if from_date > to_date:
-            st.warning("The From Date must be on or before the To Date.")
-            analytics_df = analytics_df.iloc[0:0]
-        else:
+    analytics_filter_mode, analytics_date_range = render_date_filter(
+        "Filter date",
+        mode_key="analytics_date_filter_mode",
+        range_key="analytics_date_range",
+        default_days=30,
+        default_mode="7days last",
+    )
+    if "Message Date" in analytics_df.columns and analytics_date_range:
+        if isinstance(analytics_date_range, tuple) and len(analytics_date_range) == 2:
             record_dates = analytics_df["Message Date"].dt.date
-            analytics_df = analytics_df[(record_dates >= from_date) & (record_dates <= to_date)]
+            analytics_df = analytics_df[(record_dates >= analytics_date_range[0]) & (record_dates <= analytics_date_range[1])]
 
     snapshot = {
         "total_records": len(analytics_df),
@@ -1066,7 +1211,13 @@ def render_analytics():
     with k1:
         metric_card("Total Records", f"{snapshot['total_records']:,}", "Total customer records", "")
     with k2:
-        selected_days = max(1, (to_date - from_date).days + 1)
+        if analytics_date_range and isinstance(analytics_date_range, tuple) and len(analytics_date_range) == 2:
+            selected_days = max(1, (analytics_date_range[1] - analytics_date_range[0]).days + 1)
+        elif "Message Date" in analytics_df.columns and not analytics_df.empty:
+            date_values = analytics_df["Message Date"].dropna().dt.date
+            selected_days = max(1, (date_values.max() - date_values.min()).days + 1) if not date_values.empty else 1
+        else:
+            selected_days = 1
         metric_card("Average Daily Records", f"{(snapshot['total_records'] / selected_days):.0f}", "For the selected date range", "")
     with k3:
         metric_card("Top Channel", snapshot['top_channel'], "Highest record volume", "")
@@ -1133,7 +1284,13 @@ def render_data_export():
 
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        date_range = st.date_input("Date Range", value=(NOW.date() - timedelta(days=14), NOW.date()), key="export_date_range")
+        date_filter_mode, date_range = render_date_filter(
+            "Filter date",
+            mode_key="export_date_filter_mode",
+            range_key="export_date_range",
+            default_days=14,
+            default_mode="7days last",
+        )
     with f2:
         channel_label = st.selectbox("Telegram Channel", list(channel_options), key="export_channel_filter")
         channel = channel_options[channel_label]

@@ -13,6 +13,7 @@ from collections import defaultdict
 import gspread
 import pandas as pd
 from oauth2client.service_account import ServiceAccountCredentials
+from telethon.errors import FloodWaitError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -62,6 +63,7 @@ PHONE_NUMBER = get_deployment_setting("TELEGRAM_PHONE_NUMBER", "+855885478958")
 TELEGRAM_SESSION_STRING = get_deployment_setting("TELEGRAM_SESSION_STRING")
 SHEET_ID = get_deployment_setting("GOOGLE_SHEET_ID", "1wM7DTHizhg_A3h0qV3EhX4os4hk46uolW-ESQSJkgZs")
 WORKSHEET_NAME = get_deployment_setting("GOOGLE_WORKSHEET_NAME", "Retail_update")
+TELEGRAM_FLOOD_SLEEP_THRESHOLD = 180
 
 TARGET_CHANNELS = [
     "https://t.me/+1MbLNmcPsZw5YWJl", #TLK
@@ -465,6 +467,25 @@ async def scrape_channels(
     if not selected_channels:
         selected_channels = list(TARGET_CHANNELS)
 
+    async def resolve_channel_entity(
+        client: TelegramClient,
+        channel_url: str,
+        progress_callback=None,
+        progress_value: int = 0,
+    ):
+        """Resolve a channel, waiting and retrying if Telegram rate-limits invite checks."""
+        while True:
+            try:
+                return await client.get_entity(channel_url)
+            except FloodWaitError as exc:
+                wait_seconds = max(int(getattr(exc, "seconds", 0)), 1)
+                if progress_callback:
+                    progress_callback(
+                        progress_value,
+                        f"⏳ Telegram rate-limited this channel. Waiting {wait_seconds}s before retrying...",
+                    )
+                await asyncio.sleep(wait_seconds + 1)
+
     session_name = StringSession(TELEGRAM_SESSION_STRING) if TELEGRAM_SESSION_STRING else str(SESSION_PATH)
     if not TELEGRAM_SESSION_STRING:
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -482,7 +503,13 @@ async def scrape_channels(
         )
 
     try:
-        async with TelegramClient(session_name, API_ID, API_HASH, request_retries=2) as client:
+        async with TelegramClient(
+            session_name,
+            API_ID,
+            API_HASH,
+            request_retries=2,
+            flood_sleep_threshold=TELEGRAM_FLOOD_SLEEP_THRESHOLD,
+        ) as client:
             # Use timeout for client start (30 seconds)
             try:
                 await asyncio.wait_for(client.connect(), timeout=30.0)
@@ -518,11 +545,17 @@ async def scrape_channels(
             MAX_RECORDS_PER_CHANNEL = 1000000    # Stop scanning if we get 100 good records
 
             for idx, channel_url in enumerate(channel_targets, start=1):
+                channel_progress = int(((idx - 1) / max(len(channel_targets), 1)) * 45)
                 if progress_callback:
-                    progress_callback(int((idx / max(len(channel_targets), 1)) * 45), f"Scanning channel {idx}/{len(channel_targets)}")
+                    progress_callback(channel_progress, f"Scanning channel {idx}/{len(channel_targets)}")
 
                 try:
-                    entity = await client.get_entity(channel_url)
+                    entity = await resolve_channel_entity(
+                        client,
+                        channel_url,
+                        progress_callback=progress_callback,
+                        progress_value=channel_progress,
+                    )
                     batch_messages = 0
                     batch_records = 0
                     channel_name = getattr(entity, "title", None) or channel_url
